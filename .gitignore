@@ -1,0 +1,13 @@
+# Betriebssystem / Editor
+.DS_Store
+*.swp
+*~
+
+# Logs und lokale Testartefakte
+*.log
+*.pid
+
+# Lokale Konfiguration
+*.local
+.env
+.env.*

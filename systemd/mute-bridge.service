@@ -1,0 +1,18 @@
+[Unit]
+Description=HyperX SoloCast 2 Mute-Taster -> Handy Diktat Start/Stop
+Documentation=file://%h/.local/bin/mute-bridge.sh
+After=pipewire.service wireplumber.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# ydotool spricht mit ydotoold ueber einen Socket im XDG_RUNTIME_DIR
+Environment=YDOTOOL_SOCKET=%t/.ydotool_socket
+# 0 = nur der Taster steuert Handy, Mikrofon bleibt unangetastet
+Environment=SYNC_BACK=1
+ExecStart=%h/.local/bin/mute-bridge.sh
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
