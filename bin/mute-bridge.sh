@@ -210,7 +210,25 @@ while true; do
         esac
 
         mute="$(mute_state)"
-        [ -z "$mute" ] && continue
+        if [ -z "$mute" ]; then
+            # PipeWire benennt die Quelle bei einem USB-Reconnect um
+            # (...-00.analog-stereo -> ...-00.2.analog-stereo). Der beim
+            # Start ermittelte Name ist dann dauerhaft ungueltig, deshalb
+            # hier neu suchen statt jedes Event still zu verwerfen.
+            if [ -z "${SOLOCAST_SOURCE:-}" ]; then
+                new_src="$(detect_source)"
+                if [ -n "$new_src" ] && [ "$new_src" != "$SRC" ]; then
+                    log "quelle gewechselt: '$SRC' -> '$new_src'"
+                    SRC="$new_src"
+                    last_mute="$(mute_state)"
+                    handy_recording; hr=$?
+                    if [ "$hr" = 0 ]; then last_rec=1; elif [ "$hr" = 1 ]; then last_rec=0; else last_rec=-1; fi
+                    continue
+                fi
+            fi
+            log "quelle '$SRC' nicht erreichbar — Verbindung neu aufbauen"
+            break
+        fi
         handy_recording; hr=$?
         [ "$hr" = 2 ] && { log "aufnahme-status nicht ermittelbar — uebersprungen"; continue; }
         if [ "$hr" = 0 ]; then rec=1; else rec=0; fi
