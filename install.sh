@@ -32,7 +32,7 @@ fi
 
 # --- Mikrofon erkennen ------------------------------------------------------
 info "suche HyperX SoloCast"
-SRC="$(pactl list short sources 2>/dev/null | awk 'tolower($2) ~ /solocast/ {print $2; exit}' || true)"
+SRC="$("$REPO_DIR/bin/mute-bridge.sh" --detect 2>/dev/null || true)"
 if [ -n "$SRC" ]; then
     info "gefunden: $SRC"
 else

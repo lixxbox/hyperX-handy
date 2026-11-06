@@ -25,7 +25,9 @@
 # Env:
 #   DRY_RUN=1         nur loggen, nichts senden/schalten
 #   SYNC_BACK=0       Richtung 2 (Handy -> Taster) abschalten
-#   SOLOCAST_SOURCE   Quellname ueberschreiben
+#   SOLOCAST_SOURCE   Quellname exakt ueberschreiben
+#   SOLOCAST_MATCH    Geraete-Match fuer die automatische Suche
+#                     (Default "HyperX SoloCast")
 #   DEBOUNCE          Sekunden zwischen Event und Auswertung (Default 0.15)
 #   EXPECT_MS         Wartezeit auf eigene Aenderung in ms (Default 3000)
 #   REC_CONFIRM       Stabilitaetsfenster fuer Aufnahme-Status (Default 0.30)
@@ -34,6 +36,7 @@
 set -uo pipefail
 
 SRC="${SOLOCAST_SOURCE:-}"
+SOURCE_MATCH="${SOLOCAST_MATCH:-HyperX SoloCast}"
 DRY_RUN="${DRY_RUN:-0}"
 SYNC_BACK="${SYNC_BACK:-1}"
 FORCE="${FORCE:-0}"
@@ -46,11 +49,36 @@ KEY_SEQ="29:1 57:1 57:0 29:0"
 log() { printf '%s %s\n' "$(date '+%H:%M:%S.%3N')" "$*"; }
 now_ms() { date +%s%3N; }
 
-# Quelle automatisch finden: die SoloCast-Aufnahmequelle heisst je nach
-# Firmware/Seriennummer anders, deshalb ueber den Namen suchen statt eine
-# feste ID zu verdrahten.
+# Quelle automatisch finden. Der PipeWire-Name ist NICHT stabil: nach einem
+# USB-Reconnect haengt PipeWire bei Bedarf ".2", ".3", ... an
+# (...-00.analog-stereo -> ...-00.2.analog-stereo), und die ALSA-Karten-
+# nummer kann sich ebenfalls aendern. Deshalb wird das Geraet anhand der
+# stabilen Eigenschaften (device.product.name / Description / Name) gesucht.
+# Bei mehreren Treffern (alter Node lebt beim Reconnect kurz weiter) gewinnt
+# der hoechste Index, also der neu angelegte Node.
 detect_source() {
-    pactl list short sources 2>/dev/null | awk 'tolower($2) ~ /solocast/ {print $2; exit}'
+    pactl list sources 2>/dev/null | awk -v needle="$SOURCE_MATCH" '
+        BEGIN { m = tolower(needle) }
+        function remember(idx, name, prod, desc) {
+            if (idx == "" || name == "" || name ~ /\.monitor$/) return
+            if (index(tolower(prod " " desc " " name), m) == 0) return
+            if (idx + 0 >= best) { best = idx + 0; bestname = name }
+        }
+        /^Source #[0-9]+/ {
+            remember(idx, name, prod, desc)
+            idx = $0; sub(/^Source #/, "", idx)
+            name = ""; prod = ""; desc = ""
+            next
+        }
+        /^\tName: / { name = $0; sub(/^\tName: /, "", name); next }
+        /^\tDescription: / { desc = $0; sub(/^\tDescription: /, "", desc); next }
+        /^\t\tdevice.product.name = / {
+            prod = $0; sub(/^\t\tdevice.product.name = /, "", prod); gsub(/"/, "", prod); next
+        }
+        END {
+            remember(idx, name, prod, desc)
+            if (bestname != "") print bestname
+        }'
 }
 
 mute_state() {
@@ -64,13 +92,14 @@ handy_running() {
 
 # Handys eigener Capture-Stream (cpal-pulseaudio-<pid>)
 # Rueckgabe: 0 = nimmt auf, 1 = nimmt nicht auf, 2 = nicht ermittelbar.
-# Wichtig: ein fehlgeschlagenes oder leeres pactl darf NICHT als
-# "nimmt nicht auf" gelten, sonst schaltet die Bridge das Mikrofon
-# faelschlich stumm.
+# Wichtig: nur ein FEHLGESCHLAGENES pactl ist "nicht ermittelbar". Eine
+# erfolgreiche, leere Ausgabe bedeutet dagegen eindeutig: es gibt keinen
+# Capture-Stream, also laeuft keine Aufnahme. Wird das als "unklar"
+# behandelt, verwirft die Bridge im Leerlauf (keine Source-Outputs) jedes
+# Taster-Event und startet nie eine Aufnahme.
 handy_recording() {
     local out
     out="$(pactl list source-outputs 2>/dev/null)" || return 2
-    [ -z "$out" ] && return 2
     case "$out" in
         *cpal-pulseaudio*) return 0 ;;
         *)                 return 1 ;;
@@ -160,7 +189,13 @@ set_mute() {
     return 0
 }
 
-# --- Einmalabfrage fuer Debugging -------------------------------------------
+# --- Einmalabfragen fuer Debugging/Installation ------------------------------
+if [ "${1:-}" = "--detect" ]; then
+    SRC="${SOLOCAST_SOURCE:-$(detect_source)}"
+    [ -n "$SRC" ] && { echo "$SRC"; exit 0; }
+    exit 1
+fi
+
 if [ "${1:-}" = "--status" ]; then
     [ -n "${SOLOCAST_SOURCE:-}" ] || SRC="$(detect_source)"
     if [ -z "$SRC" ]; then
@@ -202,31 +237,44 @@ while true; do
     expect_mute=""; expect_mute_until=0
     log "verbunden | $(status_line)"
 
-    pactl subscribe 2>/dev/null | while IFS= read -r line; do
+    # pactl subscribe laeuft im Coprozess. Bei einer Pipe
+    # (pactl subscribe | while ...) haengt der Abbruch sonst: der Leser
+    # bricht zwar aus, pactl merkt das aber erst beim naechsten Event und
+    # der Parent wartet endlos. Genau daran blieb die Bridge nach einem
+    # USB-Reconnect haengen und reagierte danach auf nichts mehr.
+    coproc PACTL_SUB { pactl subscribe 2>/dev/null; }
+    sub_pid="$PACTL_SUB_PID"
+    sub_fd="${PACTL_SUB[0]}"
+
+    while IFS= read -r line <&"$sub_fd"; do
         case "$line" in
             *"on source-output"*) sleep "${REC_DEBOUNCE:-0.35}" ;;
             *"on source"*|*"on card"*) sleep "$DEBOUNCE" ;;
             *) continue ;;
         esac
 
+        # Quelle bei jedem relevanten Event neu aufloesen. Der Name kann
+        # sich beim Reconnect aendern, und waehrend der Uebergangsphase
+        # koennen alter und neuer Node kurz gleichzeitig existieren.
+        if [ -z "${SOLOCAST_SOURCE:-}" ]; then
+            new_src="$(detect_source)"
+            if [ -z "$new_src" ]; then
+                log "quelle nicht erreichbar — Verbindung neu aufbauen"
+                break
+            fi
+            if [ "$new_src" != "$SRC" ]; then
+                log "quelle gewechselt: '$SRC' -> '$new_src'"
+                SRC="$new_src"
+                last_mute="$(mute_state)"
+                handy_recording; hr=$?
+                if [ "$hr" = 0 ]; then last_rec=1; elif [ "$hr" = 1 ]; then last_rec=0; else last_rec=-1; fi
+                continue
+            fi
+        fi
+
         mute="$(mute_state)"
         if [ -z "$mute" ]; then
-            # PipeWire benennt die Quelle bei einem USB-Reconnect um
-            # (...-00.analog-stereo -> ...-00.2.analog-stereo). Der beim
-            # Start ermittelte Name ist dann dauerhaft ungueltig, deshalb
-            # hier neu suchen statt jedes Event still zu verwerfen.
-            if [ -z "${SOLOCAST_SOURCE:-}" ]; then
-                new_src="$(detect_source)"
-                if [ -n "$new_src" ] && [ "$new_src" != "$SRC" ]; then
-                    log "quelle gewechselt: '$SRC' -> '$new_src'"
-                    SRC="$new_src"
-                    last_mute="$(mute_state)"
-                    handy_recording; hr=$?
-                    if [ "$hr" = 0 ]; then last_rec=1; elif [ "$hr" = 1 ]; then last_rec=0; else last_rec=-1; fi
-                    continue
-                fi
-            fi
-            log "quelle '$SRC' nicht erreichbar — Verbindung neu aufbauen"
+            log "quelle '$SRC' antwortet nicht — Verbindung neu aufbauen"
             break
         fi
         handy_recording; hr=$?
@@ -297,6 +345,10 @@ while true; do
             fi
         fi
     done
+
+    kill "$sub_pid" 2>/dev/null
+    wait "$sub_pid" 2>/dev/null
+    exec {sub_fd}<&-
 
     log "pactl subscribe beendet — Verbindung in 2s neu aufbauen"
     sleep 2

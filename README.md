@@ -114,11 +114,18 @@ quelle=alsa_input.usb-...SoloCast_2... mute=yes soll=still ist=still fremd=0 han
 
 ## Konfiguration
 
+Die Quelle wird nicht über einen festen PipeWire-Namen gesucht. PipeWire
+hängt nach einem USB-Reconnect bei Bedarf `.2`, `.3`, … an und die
+ALSA-Kartennummer kann sich ebenfalls ändern. Stattdessen erkennt die
+Bridge das Gerät an seinen stabilen Eigenschaften
+(`device.product.name`, Beschreibung, Gerätename).
+
 Per `systemctl --user edit mute-bridge.service` oder als Umgebungsvariablen:
 
 | Variable | Default | Wirkung |
 |---|---|---|
-| `SOLOCAST_SOURCE` | automatisch erkannt | PipeWire-Quellname überschreiben |
+| `SOLOCAST_MATCH` | `HyperX SoloCast` | Geräte-Match für die automatische Suche |
+| `SOLOCAST_SOURCE` | automatisch erkannt | PipeWire-Quellname exakt überschreiben |
 | `SYNC_BACK` | `1` | `0` = nur Taster steuert Handy, Mikrofon bleibt unangetastet |
 | `DRY_RUN` | `0` | `1` = nur loggen, nichts senden/schalten |
 | `FORCE` | `0` | `1` = Call-Schutz ignorieren |
@@ -145,7 +152,8 @@ Per `systemctl --user edit mute-bridge.service` oder als Umgebungsvariablen:
 pgrep -a ydotoold
 systemctl --user status ydotool.service
 
-# Wird das Mikrofon gefunden?
+# Wird das Mikrofon gefunden? (zeigt den aktuell aufgelösten Quellnamen)
+~/.local/bin/mute-bridge.sh --detect
 pactl list short sources | grep -i solocast
 
 # Erkennt die Bridge den Taster?
